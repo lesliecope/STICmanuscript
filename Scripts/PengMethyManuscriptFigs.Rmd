@@ -1,0 +1,362 @@
+---
+---
+title: "Stic vs nonstic methylation analysis 2"
+author: "Mike Considine"
+date: "9/26/2019"
+output: html_document
+---
+
+
+
+```{r packages, echo=FALSE, include=FALSE, warning=FALSE,message=FALSE,error=FALSE}
+library(minfi)
+library(limma)
+library(methylGSA)
+library(stringr)
+library(IlluminaHumanMethylationEPICanno.ilm10b2.hg19)
+library(gplots)
+library(knitr)
+opts_knit$set(global.par = TRUE)
+par(mar=c(2,5,0,0))
+```
+
+```{r helper functions, echo=FALSE, include=FALSE, warning=FALSE,message=FALSE,error=FALSE}
+getCols=function(class,subclass=NULL,bahman=FALSE){ # make it also work if there is only one class or subclass
+  # set the six hues
+  mycols = c(0, 120 / 360, 200 / 360, 60 / 360, 300 / 360)
+  # if there are subclasses
+  if (!is.null(subclass)) {
+    # if the subclasses are a numeric range
+    if (is.numeric(subclass)) {
+      # get the range to be 0-1
+      testrange2 = (subclass - min(subclass)) / max(subclass - min(subclass))
+      #set the color range to be 0.4 to 1, as darker colors can look black despite the hue
+      temp = 0.4 + testrange2 * 0.6
+      
+      # get indexes for classes of samples
+      uclas = unique(class)
+      whichclass = class
+      for (i in 1:length(class)) {
+        whichclass[which(class == uclas[i])] = i
+      }
+      
+      # assign the colors to the classes vector
+      classcols = mycols[as.numeric(whichclass)]
+      ColResult = class
+      
+      # get the color codes into the vector
+      ColResult = hsv(h = classcols, s = 1, v = temp)
+      
+      # if subclass is not numeric
+    } else{
+      # create the list for storing the color codes for each class, relative to the number of subclasses
+      temp = list()
+      
+      # loop through the unique classes, for each sample put in the appropriate range of colors
+      for (i in 1:length(unique(class))) {
+        n = length(unique(subclass[which(class == unique(class)[i])])) # how many subclasses are in this class
+        
+        if (n == 1) {
+          temp[[i]] = hsv(h = mycols[i], s = 1, v = 1)
+        } else{
+          temp[[i]] = hsv(h = mycols[i],
+                          s = 1,
+                          v = seq(1, 0.3, -0.7 / (n - 1))) # for that list element, create the color range
+        }
+        
+      }
+      
+      # will need to get the numeric rendition of which class and subclass each sample is
+      whichsub = subclass
+      whichclass = class
+      
+      uclas = unique(class)
+      
+      for (i in 1:length(class)) {
+        # which samples are each of the unique classes
+        whichclass[which(class == uclas[i])] = i
+        # the unique subclasses for each class
+        usub = unique(subclass[which(class == unique(class)[i])])
+        
+        for (j in 1:length(usub))
+          # which samples are each of the unique subclasses
+          whichsub[which(subclass == usub[j])] = j
+      }
+      
+      whichclass = as.numeric(whichclass)
+      whichsub = as.numeric(whichsub)
+      
+      ColResult = class
+      for (i in 1:length(class)) {
+        ColResult[i] = temp[[whichclass[i]]][whichsub[i]]
+      }
+      
+    }
+  } else{
+    #if there is no subclass, a rainbow is sufficient
+    mycols = rainbow(length(unique(class)))
+    uclas = unique(class)
+    whichclass = class
+    for (i in 1:length(class)) {
+      whichclass[which(class == uclas[i])] = i
+    }
+    ColResult = mycols[as.numeric(whichclass)]
+  }
+  if (bahman == TRUE) {
+    bahmanlist = as.list(unique(class))
+    names(bahmanlist) = unique(class)
+    names(ColResult) = subclass
+    for (i in class) {
+      dup = duplicated(ColResult[class == i])
+      bahmanlist[[i]] = ColResult[class == i][which(!dup)]
+    }
+    ColResult = bahmanlist
+  }
+  return(ColResult)
+} #end getCols
+
+RowVar <- function(x) {
+  rowSums((x - rowMeans(x)) ^ 2) / (dim(x)[2] - 1)
+}
+
+
+preBayesCov=function(sampClasses,dat.rma,covclasses){
+  forDesign <- as.character(na.omit(sampClasses))
+  forDesign <- factor(forDesign)####  here your levels are your classes
+  
+  ###############################################################
+  design <- model.matrix(~0+forDesign+factor(covclasses))
+  colnames(design) <- c(levels(forDesign),levels(factor(covclasses))[2])
+  fit = lmFit(dat.rma, design)
+  combos=combn(length(unique(sampClasses)),2) # calculate all pairwise permutations possible of groups
+  return(list(var1=combos,var2=fit,var3=design))
+} 
+
+```
+
+```{r load, echo=FALSE, include=FALSE, warning=FALSE,message=FALSE,error=FALSE}
+
+projdir="/Volumes/Big1/peng stic/" # CHANGE ME
+datadir= paste0(projdir,"Data/STIC")
+resultdir=paste0(projdir,"Results/")
+
+idats=dir(datadir,pattern=".idat")
+
+targets <- data.frame(paste(datadir,idats,sep=""))
+targets[,1]=as.character(targets[,1])
+colnames(targets)="Basename"
+
+RGset <- read.metharray.exp(file.path(datadir))
+
+MSet.raw <- preprocessRaw(RGset)
+
+MSet.norm <- preprocessIllumina(RGset, bg.correct = TRUE, normalize = "controls", reference = 2)
+
+qallrep1=getBeta(MSet.norm, type = "Illumina")
+#qallrep1=qallrep1[-which(Locations[rownames(qallrep1),"chr"]%in%c("chrX","chrY")),]
+
+
+sanno=read.csv(paste0(datadir,"/finannoUpdManu.csv"),header=T)
+
+rownames(sanno)=sanno$actualname
+
+
+proj1dat=qallrep1[,rownames(sanno)]
+proj1anno=sanno[colnames(proj1dat),]
+
+proj1anno$sampClass=as.character(proj1anno$UpdatedNames)
+proj1anno$sampClass[as.character(proj1anno$Sample_Group)=="N"]="Adj. norm. FTE"
+proj1anno$sampClass[as.character(proj1anno$Sample_Group)=="P"]="P53 signature"
+proj1anno$sampClass[as.character(proj1anno$Sample_Group)=="L"]="STIC"
+proj1anno$sampClass[as.character(proj1anno$Sample_Group)=="T"]="HGSC"
+proj1anno$sampClass[as.character(proj1anno$Sample_Group)=="S"]="STIC"
+
+
+colnames(proj1dat)=proj1anno$UpdatedNames
+rownames(proj1anno)=proj1anno$UpdatedNames
+colnames(proj1anno)[colnames(proj1anno)=="X"]="batch"
+#remove low variance probes
+#rv=RowVar(proj1dat)
+#lowvar=which(rv<(0.5*summary(rv)[2]))#under half of first quartile
+#proj1dat=proj1dat[-lowvar,]
+
+tmpclasscols=as.character(proj1anno$Sample_Group)
+tmpclasscols[as.character(proj1anno$Sample_Group)=="N"]="#3399FF"
+  tmpclasscols[as.character(proj1anno$Sample_Group)=="P"]="#32CD32"
+  tmpclasscols[as.character(proj1anno$Sample_Group)=="L"]="#F69691"
+  tmpclasscols[as.character(proj1anno$Sample_Group)=="T"]="#B22222"
+  tmpclasscols[as.character(proj1anno$Sample_Group)=="S"]="#F69691"
+
+
+    
+plot(density(proj1dat[,1]),col=tmpclasscols[1],main="Beta Density",ylim=c(0,3))
+for(i in 2:ncol(proj1dat)) lines(density(proj1dat[,i]),col=tmpclasscols[i])
+legend("top", inset=.008, legend=c("STIC","Adj. norm. FTE","P53 signature","HGSC"), fill=unique(tmpclasscols), horiz=FALSE)  
+  
+pdf(paste0(resultdir,"DensityPlotsFinal.pdf"))
+plot(density(proj1dat[,1]),col=tmpclasscols[1],main="Beta Density",ylim=c(0,3))
+for(i in 2:ncol(proj1dat)) lines(density(proj1dat[,i]),col=tmpclasscols[i])
+legend("top", inset=.008, legend=c("STIC","Adj. norm. FTE","P53 signature","HGSC"), fill=unique(tmpclasscols), horiz=FALSE)  
+dev.off()
+
+```
+
+
+PCA
+
+The first PC appears to distinguish the Stic from nonStic, and PC2 roughly for the patient.  T2 appears to be an outlier.
+
+```{r echo=FALSE, warning=FALSE,message=FALSE,error=FALSE}
+mypca=prcomp(t(proj1dat)) 
+
+
+# FIGURE 2
+par(mar=c(6.1, 6.1, 2.1, 2.1))
+plot(mypca$x[,1],mypca$x[,2],pch=19,col=tmpclasscols,xlab="Component 1", ylab="Component 2",cex=1.5,cex.axis=2,cex.lab=2)
+text(mypca$x[,1],mypca$x[,2]-2, labels=NA, cex = 1, adj=1)
+legend("bottomright", inset=.008, legend=c("STIC","Adj. norm. FTE","P53 signature","HGSC"), fill=unique(tmpclasscols), horiz=FALSE,cex=1.4)  
+
+par(mar=c(6.1, 6.1, 2.1, 2.1))
+plot(mypca$x[,2],mypca$x[,3],pch=19,xlab="Component 2", ylab="Component 3",col=tmpclasscols,cex=1.5,cex.axis=2,cex.lab=2)
+text(mypca$x[,2],mypca$x[,3]-2, labels=NA, cex = 1, adj=1)
+legend("bottomright", inset=.008, legend=c("STIC","Adj. norm. FTE","P53 signature","HGSC"), fill=unique(tmpclasscols), horiz=FALSE,cex=1.4)  
+
+pdf(paste0(resultdir,"PC1_PC2_Class_Plot_Final.pdf"))
+par(mar=c(6.1, 6.1, 2.1, 2.1))
+plot(mypca$x[,1],mypca$x[,2],pch=19,col=tmpclasscols,xlab="Component 1", ylab="Component 2",cex=1.5,cex.axis=2,cex.lab=2)
+text(mypca$x[,1],mypca$x[,2]-2, labels=NA, cex = 1, adj=1)
+legend("bottomright", inset=.008, legend=c("STIC","Adj. norm. FTE","P53 signature","HGSC"), fill=unique(tmpclasscols), horiz=FALSE,cex=1.4)  
+dev.off()
+
+pdf(paste0(resultdir,"PC2_PC3_Class_Plot_Final.pdf"))
+par(mar=c(6.1, 6.1, 2.1, 2.1))
+plot(mypca$x[,2],mypca$x[,3],pch=19,xlab="Component 2", ylab="Component 3",col=tmpclasscols,cex=1.5,cex.axis=2,cex.lab=2)
+text(mypca$x[,2],mypca$x[,3]-2, labels=NA, cex = 1, adj=1)
+legend("bottomright", inset=.008, legend=c("STIC","Adj. norm. FTE","P53 signature","HGSC"), fill=unique(tmpclasscols), horiz=FALSE,cex=1.4)  
+dev.off()
+
+```
+Unsupervised Clustering, one sample, T2, has been an outlier in the density plots, PCA and histograms
+```{r echo=FALSE, warning=FALSE,message=FALSE,error=FALSE}
+#Figure 2
+
+plot(hclust(dist(t(proj1dat))))
+pdf(paste0(resultdir,"Dendrogram_Plot_Final.pdf"))
+plot(hclust(dist(t(proj1dat))))
+dev.off()
+```
+
+
+
+
+
+```{r dendro, echo=FALSE, warning=FALSE,message=FALSE,error=FALSE}
+datadir2= paste0(projdir,"Data/FFPE")
+
+idats2=dir(datadir2,pattern=".idat")
+
+targets <- data.frame(paste(datadir2,idats2,sep=""))
+targets[,1]=as.character(targets[,1])
+colnames(targets)="Basename"
+
+RGset <- read.metharray.exp(file.path(datadir2))
+
+MSet.raw <- preprocessRaw(RGset)
+
+MSet.norm <- preprocessIllumina(RGset, bg.correct = TRUE, normalize = "controls", reference = 2)
+
+qallrepx=getBeta(MSet.norm, type = "Illumina")
+
+dendroanno=read.csv(paste0(datadir2,"/8 FFPE Samples sheet  YWang 06102019edit.csv"))
+rownames(dendroanno)=dendroanno$Sample_Well
+dendroanno=dendroanno[colnames(qallrepx),]
+colnames(qallrepx)=dendroanno$Sample_Name
+
+#Sup Fig S2
+plot(hclust(dist(t(qallrepx))))
+pdf(paste0(resultdir,"dendrogramFFPE_Final.pdf"))
+plot(hclust(dist(t(qallrepx))))
+dev.off()
+
+
+
+```
+
+Box plots
+
+```{r boxplots, echo=FALSE, warning=FALSE,message=FALSE,error=FALSE}
+tablea=read.table(file=paste0(datadir,"/Mean Beta Data for Figure 6a.txt"),sep="\t",header=T)
+tableb=read.table(file=paste0(datadir,"/Mean Beta Data for Figure 6b.txt"),sep="\t",header=T)
+tablec=read.table(file=paste0(datadir,"/Mean Beta Data for Figure 6c.txt"),sep="\t",header=T)
+alltable=rbind(tablea,tableb,tablec)
+#healthyftm mean
+#adj norm fte mean
+#stic mean
+#hgsc
+
+thesec=c("Healthy.FTM.mean","Adj..norm..FTE.mean","STIC.mean","HGSC.mean")
+
+
+newallmatfull=read.table(paste0(datadir,"/beta mean by disease groups for promoters.txt"),sep=" ",header=T,row.names=1)
+newallmatfull2=newallmatfull[,2:5]
+
+
+allmat2=data.frame(matrix(NA,nrow=10,ncol=4))
+
+#FIGURE 6
+
+par(mar=c(10,5,5,1))
+par(cex.axis=1.5,cex.lab=1.3)
+boxplot(ylab="Average Beta Value",xaxt="n" ,at=c(1,2,3,4,6,7,8,9,11,12,13,14,16,17,18,19),c(as.list(newallmatfull2),as.list(tablea[,thesec]),as.list(tableb[,thesec]),as.list(tablec[,thesec])),las=2,col=rep(c("#5eb7b7","#96d1c7","#ffafb0","#fc7978"),4),outline=F,ylim=c(0,1))
+stripchart(at=c(1,2,3,4,6,7,8,9,11,12,13,14,16,17,18,19),c(as.list(allmat2),as.list(tablea[,thesec]),as.list(tableb[,thesec]),as.list(tablec[,thesec])),vertical=TRUE,pch=21,method="jitter",add=TRUE,bg="black",col=rep(c("#5eb7b7","#96d1c7","#ffafb0","#fc7978"),4),lwd=1)
+legend("topright", inset=.008, legend=c("Healthy FTM","Adj. norm. FTE","STIC","HGSC"), fill=rep(c("#5eb7b7","#96d1c7","#ffafb0","#fc7978"),4), horiz=FALSE)  
+par(cex.axis=0.5)
+axis(1, at=c(2.5,7.5,12.5,17),labels=c("All Promoter Loci","STIC-Specific Loci \n (42)","HGSC-Specific Loci \n (91)","STIC/HGSC-Specific Loci \n (17)"),cex.lab=0.1)
+
+pdf(paste0(resultdir,"MeanboxplotsFig6.pdf"))
+
+par(mar=c(10,5,5,1))
+par(cex.axis=1.5,cex.lab=1.3)
+boxplot(ylab="Average Beta Value",xaxt="n" ,at=c(1,2,3,4,6,7,8,9,11,12,13,14,16,17,18,19),c(as.list(newallmatfull2),as.list(tablea[,thesec]),as.list(tableb[,thesec]),as.list(tablec[,thesec])),las=2,col=rep(c("#5eb7b7","#96d1c7","#ffafb0","#fc7978"),4),outline=F,ylim=c(0,1))
+stripchart(at=c(1,2,3,4,6,7,8,9,11,12,13,14,16,17,18,19),c(as.list(allmat2),as.list(tablea[,thesec]),as.list(tableb[,thesec]),as.list(tablec[,thesec])),vertical=TRUE,pch=21,method="jitter",add=TRUE,bg="black",col=rep(c("#5eb7b7","#96d1c7","#ffafb0","#fc7978"),4),lwd=1)
+legend("topright", inset=.008, legend=c("Healthy FTM","Adj. norm. FTE","STIC","HGSC"), fill=rep(c("#5eb7b7","#96d1c7","#ffafb0","#fc7978"),4), horiz=FALSE)  
+par(cex.axis=0.5)
+axis(1, at=c(2.5,7.5,12.5,17),labels=c("All Promoter Loci","STIC-Specific Loci \n (42)","HGSC-Specific Loci \n (91)","STIC/HGSC-Specific Loci \n (17)"),cex.lab=0.1)
+
+dev.off()
+
+tableauca=read.table(paste0(datadir,"/Mean AUC Data for Figure 6a.txt"),sep="\t",header=T)
+tableaucb=read.table(paste0(datadir,"/Mean AUC Data for Figure 6b.txt"),sep="\t",header=T)
+tableaucc=read.table(paste0(datadir,"/Mean AUC Data for Figure 6c.txt"),sep="\t",header=T)
+
+theseauc=c(
+  "HGSC.vs..Healthy.FTM.AUC"  ,
+  "STIC.vs...........Adj..norm..FTE.AUC",
+    "HGSC...STIC.vs..Healthy.FTM...Adj..norm.FTE.......AUC"
+)
+
+
+
+#FIGURE 6
+
+par(cex.axis=1.5,cex.lab=1.3)
+boxplot(ylab="Mean AUC",xaxt="n" ,c(as.list(tableauca[,theseauc]),as.list(tableaucb[,theseauc]),as.list(tableaucc[,theseauc])),col=rep(c("#afd8ff","#ffafb0","#afffd6"),4),outline=F,ylim=c(0,1.1),at=c(1,2,3,5,6,7,9,10,11),names=c("STIC-Specific Loci (42)",NA,NA, "HGSC-Specific Loci (91)", NA,NA,"STIC/HGSC-Specific Loci (17)",NA,NA))
+stripchart(list(tableauca[,"HGSC.vs..Healthy.FTM.AUC"],tableauca[,"STIC.vs...........Adj..norm..FTE.AUC"],tableauca[,"HGSC...STIC.vs..Healthy.FTM...Adj..norm.FTE.......AUC"],tableaucb[,"HGSC.vs..Healthy.FTM.AUC"],tableaucb[,"STIC.vs...........Adj..norm..FTE.AUC"],tableaucb[,"HGSC...STIC.vs..Healthy.FTM...Adj..norm.FTE.......AUC"],tableaucc[,"HGSC.vs..Healthy.FTM.AUC"],tableaucc[,"STIC.vs...........Adj..norm..FTE.AUC"],tableaucc[,"HGSC...STIC.vs..Healthy.FTM...Adj..norm.FTE.......AUC"]),vertical=TRUE,pch=21,method="jitter",add=TRUE,bg="black",col=rep(c("#afd8ff","#ffafb0","#afffd6"),4),lwd=1,,at=c(1,2,3,5,6,7,9,10,11))
+legend("bottomright", inset=.008, legend=c("HGSC vs. FTM","STIC vs Adj. Norm. FTE","HGSC & STIC vs. Adj. Norm. FTE & FTM"), fill=c("#afd8ff","#ffafb0","#afffd6"), horiz=FALSE)  
+par(cex.axis=0.8)
+axis(1, at=c(2,6,10),labels=c("STIC-Specific Loci \n (42)","HGSC-Specific Loci \n (91)","STIC/HGSC-Specific Loci \n (17)"),cex.lab=0.1)
+
+
+pdf(paste0(resultdir,"AUCboxplotsFig6.pdf"))
+par(cex.axis=1.5,cex.lab=1.3)
+boxplot(ylab="Mean AUC",xaxt="n" ,c(as.list(tableauca[,theseauc]),as.list(tableaucb[,theseauc]),as.list(tableaucc[,theseauc])),col=rep(c("#afd8ff","#ffafb0","#afffd6"),4),outline=F,ylim=c(0,1.1),at=c(1,2,3,5,6,7,9,10,11),names=c("STIC-Specific Loci (42)",NA,NA, "HGSC-Specific Loci (91)", NA,NA,"STIC/HGSC-Specific Loci (17)",NA,NA))
+stripchart(list(tableauca[,"HGSC.vs..Healthy.FTM.AUC"],tableauca[,"STIC.vs...........Adj..norm..FTE.AUC"],tableauca[,"HGSC...STIC.vs..Healthy.FTM...Adj..norm.FTE.......AUC"],tableaucb[,"HGSC.vs..Healthy.FTM.AUC"],tableaucb[,"STIC.vs...........Adj..norm..FTE.AUC"],tableaucb[,"HGSC...STIC.vs..Healthy.FTM...Adj..norm.FTE.......AUC"],tableaucc[,"HGSC.vs..Healthy.FTM.AUC"],tableaucc[,"STIC.vs...........Adj..norm..FTE.AUC"],tableaucc[,"HGSC...STIC.vs..Healthy.FTM...Adj..norm.FTE.......AUC"]),vertical=TRUE,pch=21,method="jitter",add=TRUE,bg="black",col=rep(c("#afd8ff","#ffafb0","#afffd6"),4),lwd=1,,at=c(1,2,3,5,6,7,9,10,11))
+legend("bottomright", inset=.008, legend=c("HGSC vs. FTM","STIC vs Adj. Norm. FTE","HGSC & STIC vs. Adj. Norm. FTE & FTM"), fill=c("#afd8ff","#ffafb0","#afffd6"), horiz=FALSE)  
+par(cex.axis=0.8)
+axis(1, at=c(2,6,10),labels=c("STIC-Specific Loci \n (42)","HGSC-Specific Loci \n (91)","STIC/HGSC-Specific Loci \n (17)"),cex.lab=0.1)
+dev.off()
+
+
+
+
+```
